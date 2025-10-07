@@ -21,7 +21,6 @@ const client = new MongoClient(uri, {
 
 async function run() {
   try {
-    
     // await client.connect();
 
     const userCollection = client.db("careerQuestions").collection("users");
@@ -63,6 +62,43 @@ async function run() {
       }
     });
 
+    // ---------------- USER ROLE ----------------
+
+    // Get user role by email
+    app.get("/users/role/:email", async (req, res) => {
+      try {
+        const email = req.params.email;
+        const user = await userCollection.findOne({ email: email });
+
+        if (!user) {
+          return res.status(404).send({ message: "User not found" });
+        }
+
+        res.send({ role: user.role || "user" });
+      } catch (error) {
+        console.error("Error fetching user role:", error);
+        res.status(500).send({ error: "Server error" });
+      }
+    });
+
+    // Check if user is admin
+    app.get("/users/admin/:email", async (req, res) => {
+      try {
+        const email = req.params.email;
+        const query = { email: email };
+        const user = await userCollection.findOne(query);
+
+        if (user) {
+          return res.send({ role: user.role || "user" });
+        } else {
+          return res.send({ role: "user" });
+        }
+      } catch (error) {
+        console.error("Error checking admin status:", error);
+        return res.status(500).send({ error: "Server error" });
+      }
+    });
+
     // Add new user (only if not exists) example: { __Google-SignIn___}
     app.post("/users", async (req, res) => {
       try {
@@ -89,23 +125,7 @@ async function run() {
       }
     });
 
-    // Check if user is admin
-    app.get("/users/admin/:email", async (req, res) => {
-      try {
-        const email = req.params.email;
-        const query = { email: email };
-        const user = await userCollection.findOne(query);
-
-        if (user) {
-          return res.send({ role: user.role || "user" });
-        } else {
-          return res.send({ role: "user" });
-        }
-      } catch (error) {
-        console.error("Error checking admin status:", error);
-        return res.status(500).send({ error: "Server error" });
-      }
-    });
+    // ---------------- ADMIN ROUTES ----------------
 
     // Update user role to admin (or any role)
     app.put("/users/admin/:id", async (req, res) => {
@@ -117,6 +137,128 @@ async function run() {
       };
       const result = await userCollection.updateOne(filter, updateDoc);
       res.send(result);
+    });
+
+    // Search users by name or email
+    app.get("/admin/users/search", async (req, res) => {
+      try {
+        const { query } = req.query;
+
+        if (!query || query.trim() === "") {
+          return res.status(400).send({ message: "Search query is required" });
+        }
+
+        const searchRegex = new RegExp(query, "i");
+
+        const users = await userCollection
+          .find({
+            $or: [
+              { name: { $regex: searchRegex } },
+              { email: { $regex: searchRegex } },
+            ],
+          })
+          .toArray();
+
+        res.send(users);
+      } catch (error) {
+        console.error("Error searching users:", error);
+        res.status(500).send({ error: "Server error" });
+      }
+    });
+
+    // Get all users with pagination
+    app.get("/admin/users", async (req, res) => {
+      try {
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
+        const skip = (page - 1) * limit;
+
+        const users = await userCollection
+          .find()
+          .skip(skip)
+          .limit(limit)
+          .toArray();
+
+        const total = await userCollection.countDocuments();
+
+        res.send({
+          users,
+          pagination: {
+            page,
+            limit,
+            total,
+            pages: Math.ceil(total / limit),
+          },
+        });
+      } catch (error) {
+        console.error("Error fetching users:", error);
+        res.status(500).send({ error: "Server error" });
+      }
+    });
+
+    // Toggle admin role
+    app.patch("/admin/users/:id/toggle-admin", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const { currentUserEmail } = req.body; // To prevent self-removal
+
+        // Get the target user
+        const targetUser = await userCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!targetUser) {
+          return res.status(404).send({ message: "User not found" });
+        }
+
+        // Prevent user from removing their own admin role
+        if (targetUser.email === currentUserEmail) {
+          return res
+            .status(400)
+            .send({ message: "You cannot change your own admin role" });
+        }
+
+        const newRole = targetUser.role === "admin" ? "user" : "admin";
+
+        const filter = { _id: new ObjectId(id) };
+        const updateDoc = {
+          $set: { role: newRole },
+        };
+
+        const result = await userCollection.updateOne(filter, updateDoc);
+
+        res.send({
+          ...result,
+          newRole,
+          message: `User role updated to ${newRole} successfully`,
+        });
+      } catch (error) {
+        console.error("Error updating user role:", error);
+        res.status(500).send({ error: "Server error" });
+      }
+    });
+
+    // Get admin stats
+    app.get("/admin/stats", async (req, res) => {
+      try {
+        const totalUsers = await userCollection.countDocuments();
+        const totalAdmins = await userCollection.countDocuments({
+          role: "admin",
+        });
+        const totalResults = await resultCollection.countDocuments();
+        const totalApplications =
+          await appliedInstructorCollection.countDocuments();
+
+        res.send({
+          totalUsers,
+          totalAdmins,
+          totalResults,
+          totalApplications,
+        });
+      } catch (error) {
+        console.error("Error fetching admin stats:", error);
+        res.status(500).send({ error: "Server error" });
+      }
     });
 
     // ---------------- QUESTIONS ----------------
@@ -180,7 +322,6 @@ async function run() {
     });
 
     // ---------------- INSTRUCTORS ----------------
-    
 
     app.get("/instructors", async (req, res) => {
       const doc = await instructorCollection.findOne({});
@@ -311,123 +452,75 @@ async function run() {
       }
     });
 
-    // Get books by category ID
+
+    // Improved books by category endpoint with better error handling
     app.get("/books-by-category/:categoryId", async (req, res) => {
       try {
         const { categoryId } = req.params;
+        console.log("Fetching books for category:", categoryId); // Debug log
+
         const doc = await booksCollection.findOne({});
 
-        if (!doc || !doc.categories) {
-          return res.status(404).send({ message: "No categories found" });
+        if (!doc) {
+          console.log("No document found in books collection");
+          return res.status(404).send({
+            message: "No books database found",
+            books: {},
+          });
+        }
+
+        if (!doc.categories || !Array.isArray(doc.categories)) {
+          console.log("No categories array found in document");
+          return res.status(404).send({
+            message: "No categories found in books database",
+            books: {},
+          });
         }
 
         const category = doc.categories.find((c) => c.id === categoryId);
+
         if (!category) {
-          return res.status(404).send({ message: "Category not found" });
+          console.log(
+            `Category ${categoryId} not found. Available categories:`,
+            doc.categories.map((c) => c.id)
+          );
+          return res.status(404).send({
+            message: `Category '${categoryId}' not found`,
+            books: {},
+            availableCategories: doc.categories.map((c) => ({
+              id: c.id,
+              title: c.title,
+            })),
+          });
         }
 
-        res.send({ books: category.books });
+        // Ensure books object exists and has proper structure
+        const books = category.books || {
+          level1: [],
+          level2: [],
+          level3: [],
+        };
+
+        console.log(
+          `Found ${
+            Object.values(books).flat().length
+          } books for category ${categoryId}`
+        );
+
+        res.send({
+          books: books,
+          category: category.title,
+          message: `Found books for ${category.title}`,
+        });
       } catch (error) {
         console.error("Error fetching books by category:", error);
-        res.status(500).send({ error: "Failed to fetch books" });
-      }
-    });
-
-    // Get books by category and level
-    app.get("/books/:categoryId/:level", async (req, res) => {
-      try {
-        const { categoryId, level } = req.params;
-        const doc = await booksCollection.findOne({});
-
-        if (!doc || !doc.categories) {
-          return res.status(404).send({ message: "No categories found" });
-        }
-
-        const category = doc.categories.find((c) => c.id === categoryId);
-        if (!category) {
-          return res.status(404).send({ message: "Category not found" });
-        }
-
-        const books = category.books?.[level] || [];
-        res.send({ books, category: category.title });
-      } catch (error) {
-        console.error("Error fetching books by category and level:", error);
-        res.status(500).send({ error: "Failed to fetch books" });
-      }
-    });
-
-    // Add new book
-    app.post("/books", async (req, res) => {
-      try {
-        const newBook = req.body;
-        const result = await booksCollection.insertOne(newBook);
-        res.send(result);
-      } catch (error) {
-        console.error("Error adding book:", error);
-        res.status(500).send({ error: "Failed to add book" });
-      }
-    });
-
-    // Update book
-    app.put("/books/:id", async (req, res) => {
-      try {
-        const id = req.params.id;
-        const updatedBook = req.body;
-        const filter = { _id: new ObjectId(id) };
-        const updateDoc = {
-          $set: updatedBook,
-        };
-        const result = await booksCollection.updateOne(filter, updateDoc);
-        res.send(result);
-      } catch (error) {
-        console.error("Error updating book:", error);
-        res.status(500).send({ error: "Failed to update book" });
-      }
-    });
-
-    // Delete book
-    app.delete("/books/:id", async (req, res) => {
-      try {
-        const id = req.params.id;
-        const query = { _id: new ObjectId(id) };
-        const result = await booksCollection.deleteOne(query);
-        res.send(result);
-      } catch (error) {
-        console.error("Error deleting book:", error);
-        res.status(500).send({ error: "Failed to delete book" });
-      }
-    });
-
-    // Get all books across all categories (flattened)
-    app.get("/all-books", async (req, res) => {
-      try {
-        const doc = await booksCollection.findOne({});
-        if (!doc || !doc.categories) {
-          return res.status(404).send({ message: "No books found" });
-        }
-
-        const allBooks = [];
-        doc.categories.forEach((category) => {
-          if (category.books) {
-            Object.entries(category.books).forEach(([level, books]) => {
-              books.forEach((book) => {
-                allBooks.push({
-                  ...book,
-                  category: category.id,
-                  categoryTitle: category.title,
-                  level: level,
-                });
-              });
-            });
-          }
+        res.status(500).send({
+          error: "Failed to fetch books",
+          books: {},
         });
-
-        res.send(allBooks);
-      } catch (error) {
-        console.error("Error fetching all books:", error);
-        res.status(500).send({ error: "Failed to fetch books" });
       }
     });
+
 
     // await client.db("admin").command({ ping: 1 });
     // console.log(" Connected to MongoDB Atlas successfully!");
